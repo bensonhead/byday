@@ -189,10 +189,6 @@ class TimelineInterval:
             a=self._getAccumFor(ts)
         a.update(entry)
 
-    def format(self):
-        h=self.start.strftime("%Y%m%d %H%M%S")
-        return h+':'+''.join([bucket.format() for bucket in self.buckets])
-
     def finalize(self):
         self.render.end()
 
@@ -207,25 +203,48 @@ class DayInterval(TimelineInterval):
     def reset(self,ts):
         super().reset(DayInterval.daystart(ts))
 
-    def format(self):
-        rowheader=self.start.strftime("%d:")
-        body=''.join([bucket.format() for bucket in self.buckets])
-        legend=''
-        if self.context!=None: legend=self.context.format()
-        return rowheader+body+legend
-
 class DayPrinter(Renderer):
     def __init__(self,interval):
         super().__init__(interval)
+        l=interval.length
+        s=0 # no hour marks
+        for nt in [24,12,8,4,2,1]:
+            if l//nt>=4:
+                s=nt
+                break
+        hdr=""
+        step=24/s
+        for i in range(s):
+            pos=int(l*(i*step/24.0))
+            hdr=hdr+("_" * (pos-len(hdr)))+("%d"%(int(i*step)))
+        self.scale="   "+hdr
         self.lastStart=None
 
-    def header(self,start):
-        print(start.strftime("%Y-%b"))
     def begin(self):
-        self.header(self.interval.start)
+        self._printBlockHeader(self.interval.start)
+
+    # what a separator between larger blocks looks like
+    def _printBlockHeader(self,start):
+        self.lastStart=start
+        print(start.strftime("%Y-%b"))
+        if self.scale!="":
+            print (self.scale)
+
+    # what the typical row header looks like
+    def _formatRowHeader(self, ts):
+        return ts.strftime("%d:")
 
     def main(self):
-        print(self.interval.format())
+        if self.lastStart.year!=self.interval.start.year or self.lastStart.month!=self.interval.start.month:
+            self._printBlockHeader(self.interval.start)
+
+        rh=self._formatRowHeader(self.interval.start)
+
+        body=''.join([bucket.format() for bucket in self.interval.buckets])
+        legend=''
+        if self.interval.context!=None: legend=self.interval.context.format()
+
+        print(rh+body+legend)
 
 
 
@@ -239,6 +258,57 @@ def SummarizeLogFile(logname:str, parser, row:TimelineInterval):
             parser(l,row)
         row.finalize()
 
+def matchIso(s:str):
+    import re
+    m=re.search('\d{4}([-/]?\d{2}){2}[T ]\d{2}(:\d{2}(:\d{2}(\.\d*)?)?)?([-+]\d{2}:\d{2})?',s)
+    return m
+
+# finds anything that looks like iso timestamp in the string and if found
+# passes entire string as an entry
+def parseIso(s : str, interval : TimelineInterval):
+    m=matchIso(s)
+    if m!=None:
+        try:
+            ts=datetime.fromisoformat(m.group(0))
+            interval.process(ts,s)
+        except ValueError:
+            pass
+    
+# 127.0.0.1 - - [15/Jan/2025 15:01:59] "GET / HTTP/1.1" 200 -
+#MONTHS=['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+MONTHS=[ datetime(year=1,month=i+1,day=1).strftime("%b").lower() for i in range(12)]
+def parsePythonWeb(s:str, interval:TimelineInterval):
+    m=re.search('^(\S+)\s+(\S+)\s+(\S+)\s+\[(\d+)/(.*)/(\d+) (\d+):(\d+):(\d+)\] *(.*)',s)
+    if m!=None:
+        try:
+            (ip,_,_,d,mname,y,h,m,s,rq)=m.groups()
+            mnum=MONTHS.index(mname.lower())
+            ts=datetime(year=int(y),month=int(mnum)+1, day=int(d), hour=int(h), minute=int(m), second=int(s))
+            interval.process(ts,[ip,rq])
+        except:
+            pass
+
+class WebAccum(StatAccum):
+    def update(self,data):
+        (ip,rq)=data
+        if ip=='127.0.0.1': return
+        m=re.search('"(\S+)\s+(\S+)\s*(\S*)"\s*(\d+)',rq)
+        if m!=None:
+            (verb,urn,ver,code)=m.groups()
+            super().update(int(code))
+
+    def format(self):
+        if not self.initialized: return ' '
+        if self.stat.count==0: return '-'
+        n=self.stat.max
+        if n==0: return '?'
+        return "%d"%(n//100)
+
+
 if __name__=='__main__':
     import sys
-    print("hello")
+    import shutil
+    cols=shutil.get_terminal_size((80,24)).columns
+    NBUCKETS=cols-10
+    for filename in sys.argv:
+        SummarizeLogFile(filename, parseIso,  DayInterval(NBUCKETS,accumType=Accumulator, renderType=DayPrinter))
