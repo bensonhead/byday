@@ -46,6 +46,7 @@ class Accumulator:
 
 class AccumContext:
     # called for each entry of the subinterval
+    duration_s=0
     def process(self, entry):
         pass
     # called once in the end of the row to print row "legend"
@@ -61,49 +62,38 @@ class Renderer:
     # here is the place to print main header and initialize continuity tracking
     def begin(self):
         pass
-    def main(self):
+    def printRow(self):
         pass
     def end(self):
         if self.interval.start!=None:
-            self.main()
+            self.printRow()
 
-class BitmaskContext(AccumContext):
-    """
-    contains seentoday array which shows which string corresponds to which bit
-    To be used in conjunction with BitmaskAccum
-    """
+class Stats:
     def __init__(self):
-        self.seentoday=[]
-
-    def process(self, entry):
-        "return index in seentoday array"
-        try:
-            i=self.seentoday.index(entry)
-            return i
-        except ValueError:
-            i=len(self.seentoday)
-            self.seentoday.append(entry)
-            return i
-
-    def format(self):
-        return ':'+(','.join(self.seentoday))
-
-class StatsContext(AccumContext):
-    def __init__(self):
-        super().__init__();
         self.min=float('inf')
         self.max=float('-inf')
         self.sum=0.0
         self.count=0
         self.sum2=0.0
+        self.first=None
+        self.last=None
 
     def process(self, entry):
         entry=float(entry)
         if entry>self.max: self.max=entry 
         if entry<self.min: self.min=entry 
+        if self.first==None: self.first=entry
+        self.last=entry
         self.count+=1
         self.sum+=entry
         self.sum2+=entry*entry
+
+class StatsContext(AccumContext):
+    def __init__(self):
+        self.stats=Stats()
+    def process(self,entry):
+        super().process(entry)
+        self.stats.process(entry)
 
 class BitmaskAccum(Accumulator):
     """
@@ -111,6 +101,27 @@ class BitmaskAccum(Accumulator):
     BitmaskContext contains seentoday array which shows which string corresponds to which bit
     entry must be a simple string
     """
+    class BitmaskContext(AccumContext):
+        """
+        contains seentoday array which shows which string corresponds to which
+        bit To be used in conjunction with BitmaskAccum
+        """
+        def __init__(self):
+            self.seentoday=[]
+        def process(self, entry):
+            "return index in seentoday array"
+            try:
+                i=self.seentoday.index(entry)
+                return i
+            except ValueError:
+                i=len(self.seentoday)
+                self.seentoday.append(entry)
+                return i
+        def format(self):
+            # TODO: remove common prefix and suffix
+            # TODO: if remaining is 1 character long, then ''.join
+            return ':'+(','.join(self.seentoday))
+
     contextType=BitmaskContext
 
     def __init__(self, context):
@@ -128,11 +139,11 @@ class BitmaskAccum(Accumulator):
             return "%1x"%self.mask
         return super().format()
 
-class StatAccum(Accumulator):
+class StatsAccum(Accumulator):
     contextType=StatsContext
     def __init__(self,context):
         super().__init__(context)
-        self.stat=StatsContext()
+        self.stat=Stats()
 
     def update(self, number):
         super().update(number)
@@ -142,6 +153,9 @@ class StatAccum(Accumulator):
     def format(self):
         if self.stat.count==0: return super().format()
         return ("%02d"%int(self.stat.max))[0]
+
+# "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,"^`'. "
+# " .:-=+*#%@"
 
 class TimelineInterval:
     """
@@ -165,6 +179,7 @@ class TimelineInterval:
         self.start=start
         self.finish=start+self.duration
         self.context=self.accumType.contextType()
+        self.context.duration_s=self.duration_s/self.length
         self.buckets=[self.accumType(self.context) for i in range(self.length)]
 
     # can also be used to check if timestamp belongs to the interval
@@ -183,7 +198,7 @@ class TimelineInterval:
         if a==None:
             # need new row
             # first output current row
-            self.render.main()
+            self.render.printRow()
             # then start a new one
             self.reset(ts)
             a=self._getAccumFor(ts)
@@ -203,6 +218,65 @@ class DayInterval(TimelineInterval):
     def reset(self,ts):
         super().reset(DayInterval.daystart(ts))
 
+class HourInterval(TimelineInterval):
+
+    def intervalstart(timestamp):
+        "truncate to nearest hour"
+        return timestamp.replace(minute=0,second=0,microsecond=0)
+
+    def __init__(self,length,**kwargs):
+        super().__init__(timedelta(seconds=3600),length,**kwargs)
+
+    def reset(self,ts):
+        super().reset(HourInterval.intervalstart(ts))
+
+class HourPrinter(Renderer):
+    def __init__(self,interval):
+        super().__init__(interval)
+        l=interval.length
+        s=0 # no hour marks
+        for nt in [60, 12, 6, 4, 2, 1]:
+            if l//nt>=4:
+                s=nt
+                break
+        hdr=""
+        step=60/s
+        for i in range(s):
+            pos=int(l*(i*step/60.0))
+            hdr=hdr+("_" * (pos-len(hdr)))+("%d"%(int(i*step)))
+        hdr=hdr+("_" * (l-len(hdr)))
+        self.scale=(" "*len(self._formatRowHeader(datetime.now())))+hdr
+        self.lastStart=None
+
+    def begin(self):
+        self._printBlockHeader(self.interval.start)
+
+    # what a separator between larger blocks looks like
+    def _printBlockHeader(self,start):
+        self.lastStart=start
+        print(start.strftime("%Y-%m-%d"))
+        if self.scale!="":
+            print (self.scale)
+
+    # what the typical row header looks like
+    def _formatRowHeader(self, ts):
+        return ts.strftime("%H:")
+
+    def printRow(self):
+        if self.lastStart.year!=self.interval.start.year or self.lastStart.month!=self.interval.start.month or self.lastStart.day != self.interval.start.day:
+            self._printBlockHeader(self.interval.start)
+
+        rh=self._formatRowHeader(self.interval.start)
+
+        body=''.join([bucket.format() for bucket in self.interval.buckets])
+        legend=''
+        if self.interval.context!=None: legend=self.interval.context.format()
+
+        print(rh+body+legend)
+
+
+
+
 class DayPrinter(Renderer):
     def __init__(self,interval):
         super().__init__(interval)
@@ -217,6 +291,7 @@ class DayPrinter(Renderer):
         for i in range(s):
             pos=int(l*(i*step/24.0))
             hdr=hdr+("_" * (pos-len(hdr)))+("%d"%(int(i*step)))
+        hdr=hdr+("_" * (l-len(hdr)))
         self.scale="   "+hdr
         self.lastStart=None
 
@@ -234,7 +309,7 @@ class DayPrinter(Renderer):
     def _formatRowHeader(self, ts):
         return ts.strftime("%d:")
 
-    def main(self):
+    def printRow(self):
         if self.lastStart.year!=self.interval.start.year or self.lastStart.month!=self.interval.start.month:
             self._printBlockHeader(self.interval.start)
 
@@ -288,7 +363,7 @@ def parsePythonWeb(s:str, interval:TimelineInterval):
         except:
             pass
 
-class WebAccum(StatAccum):
+class WebAccum(StatsAccum):
     def update(self,data):
         (ip,rq)=data
         if ip=='127.0.0.1': return
