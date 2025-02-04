@@ -24,16 +24,26 @@ class Accumulator:
     Represents a cell (subinterval) in a row (interval) of a timeline.
     """
 
+    class Context:
+        # called for each entry of the subinterval
+        duration_s=0
+        def process(self, entry):
+            pass
+        # called once in the end of the row to print row "legend"
+        # best if not needed
+        def format(self):
+            return ''
+
     """
     Context is accumulator for entire parent row.
     All accumulators of same row share context and can update it.
     For example, track min/max for entire row to scale the resulst when
     the row is dumped.
     """
-    contextType=type(None)
+    contextType=Context
 
     def __init__(self, context):
-        assert context==None or type(context)==self.contextType
+        assert type(context)==self.contextType
         self.context=context
         self.initialized=False
 
@@ -44,16 +54,6 @@ class Accumulator:
         if self.initialized: return '-'
         else: return ' '
 
-class AccumContext:
-    # called for each entry of the subinterval
-    duration_s=0
-    def process(self, entry):
-        pass
-    # called once in the end of the row to print row "legend"
-    # best if not needed
-    def format(self):
-        return ''
-        
 class Renderer:
     def __init__(self, interval):
         self.interval=interval
@@ -88,7 +88,7 @@ class Stats:
         self.sum+=entry
         self.sum2+=entry*entry
 
-class StatsContext(AccumContext):
+class StatsContext(Accumulator.Context):
     def __init__(self):
         self.stats=Stats()
     def process(self,entry):
@@ -101,7 +101,7 @@ class BitmaskAccum(Accumulator):
     BitmaskContext contains seentoday array which shows which string corresponds to which bit
     entry must be a simple string
     """
-    class BitmaskContext(AccumContext):
+    class BitmaskContext(Accumulator.Context):
         """
         contains seentoday array which shows which string corresponds to which
         bit To be used in conjunction with BitmaskAccum
