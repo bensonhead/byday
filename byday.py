@@ -74,6 +74,17 @@ class Stats:
         self.count+=1
         self.sum+=value
         self.sum2+=value*value
+        return self
+
+    def mergeWith(self,other):
+        if other.count==0 : return
+        if other.min<self.min: self.min=other.min
+        if other.max>self.max: self.max=other.max
+        self.last=other.last
+        self.count+=other.count
+        self.sum+=other.sum
+        self.sum2+=other.sum2
+        return self
 
 class StatsContext(Accumulator.Context):
     def __init__(self):
@@ -216,14 +227,32 @@ class Renderer:
 # use console to visualize data
 # each cell in a row is 1xN symbols, usually N=1
 class IntervalPrinter(Renderer):
-    SCALEFILLER='_'
+    SCALEFILLER='·'
     def __init__(self,duration,length,accumType=Accumulator):
         # super().__init__(duration,length,accumType)
         self.dataRow=DataRow(duration,length)
         self.dataRow.render=self
         self.dataRow.accumType=accumType
-        self.scale=""
+        self.scale=None
         self.lastStart=None
+        self.ROWHEADERWIDTH=len(self._formatRowHeader(datetime.now()))
+
+    def makeScale(self, tryTickCount):
+        l=self.dataRow.length
+        s=0 # no hour marks
+
+        maxticks=tryTickCount[0]
+        for nt in tryTickCount:
+            if l//nt>=4:
+                s=nt
+                break
+        hdr=""
+        step=maxticks/s
+        for i in range(s):
+            pos=int(l*(i*step/float(maxticks)))
+            hdr=hdr+(self.SCALEFILLER * (pos-len(hdr)))+("%d"%(int(i*step)))
+        hdr=hdr+(self.SCALEFILLER * (l-len(hdr)))
+        self.scale=hdr
 
     def begin(self):
         self._printBlockHeader(self.dataRow.start)
@@ -231,9 +260,16 @@ class IntervalPrinter(Renderer):
     # what a separator between larger blocks looks like
     def _printBlockHeader(self,start):
         self.lastStart=start
-        print(self._formatBlockHeader(start))
-        if self.scale!="":
-            print (self.scale)
+        bh=self._formatBlockHeader(start)
+        if self.scale==None:
+            print(bh)
+        else:
+            pad=self.ROWHEADERWIDTH-len(bh)
+            if pad>=0:
+                print(bh+(' '*w)+self.scale)
+            else:
+                print(bh)
+                print( (' '*self.ROWHEADERWIDTH)+self.scale)
 
     def _formatBlockHeader(self,start):
         return "%s"%start;
@@ -257,19 +293,7 @@ class IntervalPrinter(Renderer):
 class HourPrinter(IntervalPrinter):
     def __init__(self,length, accumType):
         super().__init__(timedelta(seconds=3600),length, accumType)
-        l=length
-        s=0 # no hour marks
-        for nt in [60, 12, 6, 4, 2, 1]:
-            if l//nt>=4:
-                s=nt
-                break
-        hdr=""
-        step=60/s
-        for i in range(s):
-            pos=int(l*(i*step/60.0))
-            hdr=hdr+(self.SCALEFILLER * (pos-len(hdr)))+("%d"%(int(i*step)))
-        hdr=hdr+(self.SCALEFILLER * (l-len(hdr)))
-        self.scale=(" "*len(self._formatRowHeader(datetime.now())))+hdr
+        self.makeScale([60, 12, 6, 4, 2, 1])
 
     def startFor(self,ts):
         return ts.replace(minute=0,second=0,microsecond=0)
@@ -289,19 +313,8 @@ class HourPrinter(IntervalPrinter):
 class DayPrinter(IntervalPrinter):
     def __init__(self,length, accumType):
         super().__init__(timedelta(days=1),length,accumType)
-        l=length
-        s=0 # no hour marks
-        for nt in [24,12,8,4,2,1]:
-            if l//nt>=4:
-                s=nt
-                break
-        hdr=""
-        step=24/s
-        for i in range(s):
-            pos=int(l*(i*step/24.0))
-            hdr=hdr+(self.SCALEFILLER * (pos-len(hdr)))+("%d"%(int(i*step)))
-        hdr=hdr+(self.SCALEFILLER * (l-len(hdr)))
-        self.scale=(" " * len(self._formatRowHeader(datetime.now())))+hdr
+        self.makeScale([24,12,8,4,2,1])
+
     def startFor(self,ts):
         return ts.replace(hour=0,minute=0,second=0,microsecond=0)
 
