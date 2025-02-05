@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import re
 
 """
 represent each time interval (e.g. 1 day)
@@ -54,20 +55,6 @@ class Accumulator:
         if self.initialized: return '-'
         else: return ' '
 
-class Renderer:
-    def __init__(self, interval):
-        self.interval=interval
-    # called when the very first row is ready to accept data
-    # interval is reset, but buckets are empty
-    # here is the place to print main header and initialize continuity tracking
-    def begin(self):
-        pass
-    def printRow(self):
-        pass
-    def end(self):
-        if self.interval.start!=None:
-            self.printRow()
-
 class Stats:
     def __init__(self):
         self.min=float('inf')
@@ -78,22 +65,22 @@ class Stats:
         self.first=None
         self.last=None
 
-    def process(self, entry):
-        entry=float(entry)
-        if entry>self.max: self.max=entry 
-        if entry<self.min: self.min=entry 
-        if self.first==None: self.first=entry
-        self.last=entry
+    def update(self, value):
+        value=float(value)
+        if value>self.max: self.max=value
+        if value<self.min: self.min=value
+        if self.first==None: self.first=value
+        self.last=value
         self.count+=1
-        self.sum+=entry
-        self.sum2+=entry*entry
+        self.sum+=value
+        self.sum2+=value*value
 
 class StatsContext(Accumulator.Context):
     def __init__(self):
         self.stats=Stats()
     def process(self,entry):
         super().process(entry)
-        self.stats.process(entry)
+        self.stats.update(entry)
 
 class BitmaskAccum(Accumulator):
     """
@@ -148,7 +135,7 @@ class StatsAccum(Accumulator):
     def update(self, number):
         super().update(number)
         self.context.process(number)
-        self.stat.process(number)
+        self.stat.update(number)
 
     def format(self):
         if self.stat.count==0: return super().format()
@@ -157,7 +144,7 @@ class StatsAccum(Accumulator):
 # "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,"^`'. "
 # " .:-=+*#%@"
 
-class TimelineInterval:
+class DataRow:
     """
     Serves as a base class, but may be used by itself
     intended to be initialized once and then reused for each subsequent rows of
@@ -171,15 +158,19 @@ class TimelineInterval:
         self.duration_s=duration.total_seconds()
         self.length=length
         self.context=None
-        self.renderType=Renderer
+        self.render=None
         self.__dict__.update(kwargs)
-        self.render=self.renderType(self)
 
-    def reset(self, start=None):
+    def reset(self, ts):
+        start=self.render.startFor(ts)
         self.start=start
+        # this may be overridden to be less than full duration
+        # e.g. month view would have reserved space for 31 days, but only days
+        # of current month will be actually filled
         self.finish=start+self.duration
         self.context=self.accumType.contextType()
         self.context.duration_s=self.duration_s/self.length
+        # all buckets share row context
         self.buckets=[self.accumType(self.context) for i in range(self.length)]
 
     # can also be used to check if timestamp belongs to the interval
@@ -204,36 +195,69 @@ class TimelineInterval:
             a=self._getAccumFor(ts)
         a.update(entry)
 
-    def finalize(self):
-        self.render.end()
+class Renderer:
+    # called when the very first row is ready to accept data
+    # interval is reset, but buckets are empty
+    # here is the place to print main header and initialize continuity tracking
+    def begin(self):
+        pass
+    def printRow(self):
+        pass
+    def end(self):
+        if self.dataRow.start!=None:
+            self.printRow()
+    def process(self,ts,entry):
+        self.dataRow.process(ts,entry)
+    # calculate beginning of a row interval for a givent ts.
+    # override when necessary to round to nearest day, hour, etc.
+    def startFor(self,ts):
+        return ts
 
-class DayInterval(TimelineInterval):
+# use console to visualize data
+# each cell in a row is 1xN symbols, usually N=1
+class IntervalPrinter(Renderer):
+    SCALEFILLER='_'
+    def __init__(self,duration,length,accumType=Accumulator):
+        # super().__init__(duration,length,accumType)
+        self.dataRow=DataRow(duration,length)
+        self.dataRow.render=self
+        self.dataRow.accumType=accumType
+        self.scale=""
+        self.lastStart=None
 
-    def daystart(timestamp):
-        return timestamp.replace(hour=0,minute=0,second=0,microsecond=0)
+    def begin(self):
+        self._printBlockHeader(self.dataRow.start)
 
-    def __init__(self,length,**kwargs):
-        super().__init__(timedelta(days=1),length,**kwargs)
+    # what a separator between larger blocks looks like
+    def _printBlockHeader(self,start):
+        self.lastStart=start
+        print(self._formatBlockHeader(start))
+        if self.scale!="":
+            print (self.scale)
 
-    def reset(self,ts):
-        super().reset(DayInterval.daystart(ts))
+    def _formatBlockHeader(self,start):
+        return "%s"%start;
 
-class HourInterval(TimelineInterval):
+    # first blockheader always printed regardless
+    def _isBlockHeaderNeeded(self):
+        return False
 
-    def intervalstart(timestamp):
-        "truncate to nearest hour"
-        return timestamp.replace(minute=0,second=0,microsecond=0)
+    def printRow(self):
+        if self._isBlockHeaderNeeded():
+            self._printBlockHeader(self.dataRow.start)
 
-    def __init__(self,length,**kwargs):
-        super().__init__(timedelta(seconds=3600),length,**kwargs)
+        rh=self._formatRowHeader(self.dataRow.start)
 
-    def reset(self,ts):
-        super().reset(HourInterval.intervalstart(ts))
+        body=''.join([bucket.format() for bucket in self.dataRow.buckets])
+        legend=''
+        if self.dataRow.context!=None: legend=self.dataRow.context.format()
 
-class HourPrinter(Renderer):
-    def __init__(self,interval):
-        super().__init__(interval)
-        l=interval.length
+        print(rh+body+legend)
+
+class HourPrinter(IntervalPrinter):
+    def __init__(self,length, accumType):
+        super().__init__(timedelta(seconds=3600),length, accumType)
+        l=length
         s=0 # no hour marks
         for nt in [60, 12, 6, 4, 2, 1]:
             if l//nt>=4:
@@ -243,44 +267,29 @@ class HourPrinter(Renderer):
         step=60/s
         for i in range(s):
             pos=int(l*(i*step/60.0))
-            hdr=hdr+("_" * (pos-len(hdr)))+("%d"%(int(i*step)))
-        hdr=hdr+("_" * (l-len(hdr)))
+            hdr=hdr+(self.SCALEFILLER * (pos-len(hdr)))+("%d"%(int(i*step)))
+        hdr=hdr+(self.SCALEFILLER * (l-len(hdr)))
         self.scale=(" "*len(self._formatRowHeader(datetime.now())))+hdr
-        self.lastStart=None
 
-    def begin(self):
-        self._printBlockHeader(self.interval.start)
+    def startFor(self,ts):
+        return ts.replace(minute=0,second=0,microsecond=0)
 
-    # what a separator between larger blocks looks like
-    def _printBlockHeader(self,start):
-        self.lastStart=start
-        print(start.strftime("%Y-%m-%d"))
-        if self.scale!="":
-            print (self.scale)
+    def _formatBlockHeader(self,start):
+        return start.strftime("%Y-%m-%d")
 
-    # what the typical row header looks like
     def _formatRowHeader(self, ts):
         return ts.strftime("%H:")
 
-    def printRow(self):
-        if self.lastStart.year!=self.interval.start.year or self.lastStart.month!=self.interval.start.month or self.lastStart.day != self.interval.start.day:
-            self._printBlockHeader(self.interval.start)
+    def _isBlockHeaderNeeded(self):
+        return (self.lastStart.year!=self.dataRow.start.year
+            or self.lastStart.month!=self.dataRow.start.month
+            or self.lastStart.day!=self.dataRow.start.day)
 
-        rh=self._formatRowHeader(self.interval.start)
-
-        body=''.join([bucket.format() for bucket in self.interval.buckets])
-        legend=''
-        if self.interval.context!=None: legend=self.interval.context.format()
-
-        print(rh+body+legend)
-
-
-
-
-class DayPrinter(Renderer):
-    def __init__(self,interval):
-        super().__init__(interval)
-        l=interval.length
+# each row is a day
+class DayPrinter(IntervalPrinter):
+    def __init__(self,length, accumType):
+        super().__init__(timedelta(days=1),length,accumType)
+        l=length
         s=0 # no hour marks
         for nt in [24,12,8,4,2,1]:
             if l//nt>=4:
@@ -290,76 +299,60 @@ class DayPrinter(Renderer):
         step=24/s
         for i in range(s):
             pos=int(l*(i*step/24.0))
-            hdr=hdr+("_" * (pos-len(hdr)))+("%d"%(int(i*step)))
-        hdr=hdr+("_" * (l-len(hdr)))
-        self.scale="   "+hdr
-        self.lastStart=None
+            hdr=hdr+(self.SCALEFILLER * (pos-len(hdr)))+("%d"%(int(i*step)))
+        hdr=hdr+(self.SCALEFILLER * (l-len(hdr)))
+        self.scale=(" " * len(self._formatRowHeader(datetime.now())))+hdr
+    def startFor(self,ts):
+        return ts.replace(hour=0,minute=0,second=0,microsecond=0)
 
-    def begin(self):
-        self._printBlockHeader(self.interval.start)
+    def _formatBlockHeader(self,start):
+        return start.strftime("%Y-%b")
 
-    # what a separator between larger blocks looks like
-    def _printBlockHeader(self,start):
-        self.lastStart=start
-        print(start.strftime("%Y-%b"))
-        if self.scale!="":
-            print (self.scale)
-
-    # what the typical row header looks like
     def _formatRowHeader(self, ts):
         return ts.strftime("%d:")
 
-    def printRow(self):
-        if self.lastStart.year!=self.interval.start.year or self.lastStart.month!=self.interval.start.month:
-            self._printBlockHeader(self.interval.start)
+    def _isBlockHeaderNeeded(self):
+        return (self.lastStart.year!=self.dataRow.start.year
+            or self.lastStart.month!=self.dataRow.start.month)
 
-        rh=self._formatRowHeader(self.interval.start)
+# TODO? WeekPrinter? Monthprinter? YearPrinter? MinutePrinter
 
-        body=''.join([bucket.format() for bucket in self.interval.buckets])
-        legend=''
-        if self.interval.context!=None: legend=self.interval.context.format()
-
-        print(rh+body+legend)
-
-
-
-def SummarizeLogFile(logname:str, parser, row:TimelineInterval):
+def SummarizeLogFile(logname:str, parser, r:Renderer):
     with open(logname,"r") as file:
         while True:
             line=file.readline()
             if not line: break
             # log-specific parsing
             l=line.rstrip("\r\n")
-            parser(l,row)
-        row.finalize()
+            parser(l,r)
+        r.end()
 
 def matchIso(s:str):
-    import re
     m=re.search('\d{4}([-/]?\d{2}){2}[T ]\d{2}(:\d{2}(:\d{2}(\.\d*)?)?)?([-+]\d{2}:\d{2})?',s)
     return m
 
 # finds anything that looks like iso timestamp in the string and if found
 # passes entire string as an entry
-def parseIso(s : str, interval : TimelineInterval):
+def parseIso(s : str, r : Renderer):
     m=matchIso(s)
     if m!=None:
         try:
             ts=datetime.fromisoformat(m.group(0))
-            interval.process(ts,s)
+            r.process(ts,s)
         except ValueError:
             pass
-    
+
 # 127.0.0.1 - - [15/Jan/2025 15:01:59] "GET / HTTP/1.1" 200 -
 #MONTHS=['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 MONTHS=[ datetime(year=1,month=i+1,day=1).strftime("%b").lower() for i in range(12)]
-def parsePythonWeb(s:str, interval:TimelineInterval):
+def parsePythonWeb(s:str, r:Renderer):
     m=re.search('^(\S+)\s+(\S+)\s+(\S+)\s+\[(\d+)/(.*)/(\d+) (\d+):(\d+):(\d+)\] *(.*)',s)
     if m!=None:
         try:
             (ip,_,_,d,mname,y,h,m,s,rq)=m.groups()
             mnum=MONTHS.index(mname.lower())
             ts=datetime(year=int(y),month=int(mnum)+1, day=int(d), hour=int(h), minute=int(m), second=int(s))
-            interval.process(ts,[ip,rq])
+            r.process(ts,[ip,rq])
         except:
             pass
 
@@ -379,6 +372,7 @@ class WebAccum(StatsAccum):
         if n==0: return '?'
         return "%d"%(n//100)
 
+# TODO: -n <buckets> -d (dayly) -H (hourly), -m -w -y -M
 
 if __name__=='__main__':
     import sys
@@ -386,4 +380,4 @@ if __name__=='__main__':
     cols=shutil.get_terminal_size((80,24)).columns
     NBUCKETS=cols-10
     for filename in sys.argv:
-        SummarizeLogFile(filename, parseIso,  DayInterval(NBUCKETS,accumType=Accumulator, renderType=DayPrinter))
+        SummarizeLogFile(filename, parseIso,  DayPrinter(NBUCKETS,Accumulator))
