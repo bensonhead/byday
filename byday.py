@@ -161,26 +161,25 @@ class DataRow:
     intended to be initialized once and then reused for each subsequent rows of
     a summary
     """
-    def __init__(self,duration,length,**kwargs):
+    def __init__(self,length,**kwargs):
         self.start=None
         self.finish=None
         self.accumType=Accumulator
-        self.duration=duration
-        self.duration_s=duration.total_seconds()
+        self.duration=None
+        self.duration_s=None
         self.length=length
         self.context=None
         self.render=None
         self.__dict__.update(kwargs)
 
+    def setDuration(self,d:timedelta):
+        self.duration=d;
+        self.duration_s=d.total_seconds();
+
     def reset(self, ts):
-        start=self.render.startFor(ts)
-        self.start=start
-        # this may be overridden to be less than full duration
-        # e.g. month view would have reserved space for 31 days, but only days
-        # of current month will be actually filled
-        self.finish=start+self.duration
+        self.render.setRangeFor(ts,self)
+        # initialize common context
         self.context=self.accumType.contextType()
-        self.context.duration_s=self.duration_s/self.length
         # all buckets share row context
         self.buckets=[self.accumType(self.context) for i in range(self.length)]
 
@@ -210,19 +209,39 @@ class Renderer:
     # called when the very first row is ready to accept data
     # interval is reset, but buckets are empty
     # here is the place to print main header and initialize continuity tracking
+
+    # renderer does to kinds of timezone processing:
+    # 1) it can assign timezone to the timestamps that do not have it explicitly
+    ITZ=None # if input time stamp's timezone is not explicit, use this one
+    # 2) convert timezone for output
+    OTZ=None # output time zone, None=local
     def begin(self):
         pass
     def printRow(self):
         pass
+    # called by parser at the end of the file
     def end(self):
         if self.dataRow.start!=None:
             self.printRow()
+    # called by parser for each found entry
     def process(self,ts,entry):
+        if ts.tzinfo==None:
+            ts=ts.replace(tzinfo=self.ITZ)
+        ts=ts.astimezone(self.OTZ)
         self.dataRow.process(ts,entry)
     # calculate beginning of a row interval for a givent ts.
     # override when necessary to round to nearest day, hour, etc.
     def startFor(self,ts):
         return ts
+    def setRangeFor(self,ts,dr:DataRow):
+        start=self.startFor(ts)
+        dr.start=start
+        # this may be overridden to be less than full duration
+        # e.g. month view would have reserved space for 31 days, but only days
+        # of current month will be actually filled
+        dr.finish=start+self.rowDuration
+        dr.setDuration(self.rowDuration)
+
 
 # use console to visualize data
 # each cell in a row is 1xN symbols, usually N=1
@@ -230,9 +249,8 @@ class IntervalPrinter(Renderer):
     SCALEFILLER='·'
     def __init__(self,duration,length,accumType=Accumulator):
         # super().__init__(duration,length,accumType)
-        self.dataRow=DataRow(duration,length)
-        self.dataRow.render=self
-        self.dataRow.accumType=accumType
+        self.rowDuration=duration
+        self.dataRow=DataRow(length,render=self,accumType=accumType)
         self.scale=None
         self.lastStart=None
         self.ROWHEADERWIDTH=len(self._formatRowHeader(datetime.now()))
@@ -266,7 +284,7 @@ class IntervalPrinter(Renderer):
         else:
             pad=self.ROWHEADERWIDTH-len(bh)
             if pad>=0:
-                print(bh+(' '*w)+self.scale)
+                print(bh+(' '*pad)+self.scale)
             else:
                 print(bh)
                 print( (' '*self.ROWHEADERWIDTH)+self.scale)
@@ -289,6 +307,36 @@ class IntervalPrinter(Renderer):
         if self.dataRow.context!=None: legend=self.dataRow.context.format()
 
         print(rh+body+legend)
+
+class MinutePrinter(IntervalPrinter):
+    def __init__(self,length, accumType):
+        super().__init__(timedelta(seconds=60),length, accumType)
+        self.makeScale([60, 12, 6, 4, 2, 1])
+        self.lastBlockHeader=None
+
+    def startFor(self,ts):
+        return ts.replace(second=0,microsecond=0)
+
+    def _formatBlockHeader(self,start):
+        h=""
+        if (self.lastBlockHeader==None
+        or self.lastBlockHeader.day!=start.day
+        or self.lastBlockHeader.month!=start.month
+        or self.lastBlockHeader.year!=start.year):
+            h=start.strftime("%Y-%m-%d %H:%M")
+        else:
+            h=start.strftime("%H:")
+        self.lastBlockHeader=start
+        return h
+
+    def _formatRowHeader(self, ts):
+        return ts.strftime(" :%M|")
+
+    def _isBlockHeaderNeeded(self):
+        return (self.lastStart.year!=self.dataRow.start.year
+            or self.lastStart.month!=self.dataRow.start.month
+            or self.lastStart.day!=self.dataRow.start.day
+            or self.lastStart.hour!=self.dataRow.start.hour)
 
 class HourPrinter(IntervalPrinter):
     def __init__(self,length, accumType):
@@ -327,6 +375,55 @@ class DayPrinter(IntervalPrinter):
     def _isBlockHeaderNeeded(self):
         return (self.lastStart.year!=self.dataRow.start.year
             or self.lastStart.month!=self.dataRow.start.month)
+
+# each row is a month
+class MonthPrinter(IntervalPrinter):
+    def __init__(self,length, accumType):
+        super().__init__(timedelta(days=31),length,accumType)
+        self.makeMonthScale([1,2,[4,5],[9,10]])
+
+    def makeMonthScale(self, trySteps):
+        l=self.dataRow.length
+
+        sm=datetime(year=2000,month=1,day=1)
+        dur_s=self.rowDuration.total_seconds()
+        for stp in trySteps:
+            if type(stp)==int: stp=[stp,stp]
+            pd=1
+            hdr="%d"%pd
+            s=stp[0]
+            while (nd:=pd+s)<=31:
+                ni=int(l*(sm.replace(day=nd)-sm).total_seconds()/dur_s)
+                if ni-len(hdr)<1:
+                    break
+                hdr+=self.SCALEFILLER *(ni-len(hdr)) + "%d"%nd
+                pd=nd
+                s=stp[-1]
+            else:
+                self.scale=hdr+(self.SCALEFILLER * (l-len(hdr)))
+                break
+
+    def startFor(self,ts):
+        assert False
+
+    def setRangeFor(self,ts,dr:DataRow):
+        start=ts.replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+        dr.start=start
+        dr.setDuration(self.rowDuration)
+        for ml in [28,29,30,31]:
+            dr.finish=start+timedelta(ml)
+            if dr.finish.day==1: break
+        else:
+            assert False
+
+    def _formatBlockHeader(self,start):
+        return start.strftime("%Y")
+
+    def _formatRowHeader(self, ts):
+        return ts.strftime("%b :")
+
+    def _isBlockHeaderNeeded(self):
+        return (self.lastStart.year!=self.dataRow.start.year)
 
 # TODO? WeekPrinter? Monthprinter? YearPrinter? MinutePrinter
 
@@ -384,8 +481,6 @@ class WebAccum(StatsAccum):
         n=self.stat.max
         if n==0: return '?'
         return "%d"%(n//100)
-
-# TODO: -n <buckets> -d (dayly) -H (hourly), -m -w -y -M
 
 if __name__=='__main__':
     import sys
