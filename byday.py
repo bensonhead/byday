@@ -499,6 +499,26 @@ class WebAccum(StatsAccum):
         if n==0: return '?'
         return "%d"%(n//100)
 
+# must receive entry as a pair of (prio:int, symbol:string)
+# symbol represents event, prio its importance. Events with higher importance
+# override events with lower importance
+class PriorityEventsAccum(Accumulator):
+    prio=-999999
+    symb='?'
+    count=0
+    def update(self,entry):
+        super().update(entry)
+        try:
+            prio,symb=entry
+            if prio>self.prio:
+                self.symb=symb
+                self.prio=prio
+                self.count=0
+            elif prio==self.prio:
+                self.count+=1
+        except ValueError:
+            pass
+
 if __name__=='__main__':
     import sys
     import shutil
