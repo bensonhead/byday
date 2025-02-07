@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
 
 """
@@ -116,9 +116,9 @@ class BitmaskAccum(Accumulator):
                 self.seentoday.append(entry)
                 return i
         def format(self):
-            # TODO: remove common prefix and suffix
-            # TODO: if remaining is 1 character long, then ''.join
-            return ':'+(','.join(self.seentoday))
+            j=','
+            if len(self.seentoday)>0 and max([len(e) for e in self.seentoday])<=1: j=''
+            return ':'+(j.join(self.seentoday))
 
     contextType=BitmaskContext
 
@@ -133,8 +133,9 @@ class BitmaskAccum(Accumulator):
             self.mask |= 1<<self.context.process(e)
 
     def format(self):
-        if self.mask>0:
-            return "%1x"%self.mask
+        if self.mask>15: return '≡'
+        if self.mask>3: return "%1x"%self.mask
+        if self.mask>0: return "?▀▄█"[self.mask]
         return super().format()
 
 class StatsAccum(Accumulator):
@@ -206,17 +207,21 @@ class DataRow:
         a.update(entry)
 
 class Renderer:
-    # called when the very first row is ready to accept data
-    # interval is reset, but buckets are empty
-    # here is the place to print main header and initialize continuity tracking
 
     # renderer does to kinds of timezone processing:
     # 1) it can assign timezone to the timestamps that do not have it explicitly
     ITZ=None # if input time stamp's timezone is not explicit, use this one
     # 2) convert timezone for output
     OTZ=None # output time zone, None=local
+
+    # called when the very first row is ready to accept data
+    # interval is reset, but buckets are empty
+    # here is the place to print main header and initialize continuity tracking
     def begin(self):
         pass
+    # called when row is ready to be printed. This must be overridden in
+    # subclasses and implement different row headers, decision to insert
+    # intermediate block headers, etc.
     def printRow(self):
         pass
     # called by parser at the end of the file
@@ -247,6 +252,18 @@ class Renderer:
 # each cell in a row is 1xN symbols, usually N=1
 class IntervalPrinter(Renderer):
     SCALEFILLER='·'
+    # terminal-specific
+    def nocolor(self):
+        self.ATTR_BLOCKHEADER=''
+        self.ATTR_ROWHEADER=''
+        self.ATTR_SCALE=''
+        self.ATTR_NORMAL=''
+
+    ATTR_BLOCKHEADER='\x1b[92m'
+    ATTR_ROWHEADER='\x1b[36m'
+    ATTR_SCALE='\x1b[90m'
+    ATTR_NORMAL='\x1b(B\x1b[m'
+
     def __init__(self,duration,length,accumType=Accumulator):
         # super().__init__(duration,length,accumType)
         self.rowDuration=duration
@@ -284,10 +301,10 @@ class IntervalPrinter(Renderer):
         else:
             pad=self.ROWHEADERWIDTH-len(bh)
             if pad>=0:
-                print(bh+(' '*pad)+self.scale)
+                print(self.ATTR_BLOCKHEADER+bh+(' '*pad)+self.ATTR_SCALE+self.scale+self.ATTR_NORMAL)
             else:
-                print(bh)
-                print( (' '*self.ROWHEADERWIDTH)+self.scale)
+                print(self.ATTR_BLOCKHEADER+bh)
+                print( self.ATTR_BLOCKHEADER+(' '*self.ROWHEADERWIDTH)+self.ATTR_SCALE+self.scale+self.ATTR_NORMAL)
 
     def _formatBlockHeader(self,start):
         return "%s"%start;
@@ -306,7 +323,7 @@ class IntervalPrinter(Renderer):
         legend=''
         if self.dataRow.context!=None: legend=self.dataRow.context.format()
 
-        print(rh+body+legend)
+        print(self.ATTR_ROWHEADER+rh+self.ATTR_NORMAL+body+self.ATTR_SCALE+legend+self.ATTR_NORMAL)
 
 class MinutePrinter(IntervalPrinter):
     def __init__(self,length, accumType):
@@ -487,5 +504,24 @@ if __name__=='__main__':
     import shutil
     cols=shutil.get_terminal_size((80,24)).columns
     NBUCKETS=cols-10
-    for filename in sys.argv:
-        SummarizeLogFile(filename, parseIso,  DayPrinter(NBUCKETS,Accumulator))
+    IntervalPrinter.nocolor(IntervalPrinter)
+    renderer=DayPrinter
+    option=None
+    for arg in sys.argv[1:]:
+        if option==None and arg[0]=='-':
+            o=arg[1:]
+            if o in ['w','b']:
+                option=o
+            elif o=='m' :render=MonthPrinter
+            elif o=='d' :render=DayPrinter
+            elif o=='H' :render=HourPrinter
+            elif o=='M' :render=MinutePrinter
+            elif o=='u' :Renderer.ITZ=timezone.utc
+            elif o=='ou' :Renderer.OTZ=timezone.utc
+            else: print("unknown option %s"%arg)
+        elif option!=None:
+            if   option=='w': NBUCKETS+=int(arg)
+            elif option=='b': NBUCKETS=int(arg)
+            option=None
+        else:
+            SummarizeLogFile(arg, parseIso,  renderer(NBUCKETS,Accumulator))
