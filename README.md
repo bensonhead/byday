@@ -27,6 +27,7 @@ Class Aggregator {
   format()
 }
 @enduml
+```
 
 Each time this summarizer receives a timestamped log entry, it determines which aggregator of a row needs to be updated and calls its `.update(entry)` method.
 
