@@ -491,10 +491,18 @@ class MonthPrinter(IntervalPrinter):
 
 # TODO? WeekPrinter? Monthprinter? YearPrinter? MinutePrinter
 
+def openLogFile(logname):
+    if logname[-3:]=='.gz':
+        import gzip
+        return gzip.open(logname,"rb")
+    else:
+        return open(logname,"rb")
+
 def SummarizeLogFile(logname:str, parser, r:Renderer):
-    with open(logname,"r") as file:
+    with openLogFile(logname) as file:
         while True:
             line=file.readline()
+            line=line.decode('utf-8')
             if not line: break
             # log-specific parsing
             l=line.rstrip("\r\n")
