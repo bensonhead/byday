@@ -48,42 +48,73 @@ class Accumulator:
         self.context=context
         self.initialized=False
 
+    def __add__(self,entry):
+        return self.update(entry)
+        
     def update(self,entry):
         self.initialized=True
+        return self
+
+    def __str__(self):
+        return self.format()
 
     def format(self):
         if self.initialized: return '-'
         else: return ' '
 
-class Stats:
+class Counted:
     def __init__(self):
-        self.min=float('inf')
-        self.max=float('-inf')
-        self.sum=0.0
         self.count=0
-        self.sum2=0.0
         self.first=None
         self.last=None
 
     def update(self, value):
-        value=float(value)
-        if value>self.max: self.max=value
-        if value<self.min: self.min=value
-        if self.first==None: self.first=value
-        self.last=value
-        self.count+=1
-        self.sum+=value
-        self.sum2+=value*value
+        if isinstance(value,Counted)
+            if self.first==None: self.first=value.first
+            self.last=value.last
+            self.count+=value.count
+        else:
+            if self.first==None: self.first=value
+            self.last=value
+            self.count+=1
         return self
 
-    def mergeWith(self,other):
-        if other.count==0 : return
-        if other.min<self.min: self.min=other.min
-        if other.max>self.max: self.max=other.max
-        self.last=other.last
-        self.count+=other.count
-        self.sum+=other.sum
-        self.sum2+=other.sum2
+class Ordered(Counted):
+    def __init__(self):
+        super().__init__()
+        self.min=None
+        self.max=None
+
+    def update(self,value):
+        super().update(value)
+        if isinstance(value,Ordered):
+            if self.min==None or ( value.min!=None and value.min<self.min): self.min=value.min
+            if self.max==None or (value.max !=None and value.max>self.max): self.max=value.max
+        else:
+            if self.min==None or value<self.min: self.min=value
+            if self.max==None or value>self.max: self.max=value
+        return self
+
+
+class Stats(Ordered):
+    def __init__(self):
+        super().__init__()
+        self.sum=0.0
+        self.sum2=0.0
+
+    def __repr__(self):
+        return f"{__name__}({self.min}..{self.max}/{self.count})"
+
+    def update(self, value):
+        super().update(value)
+        if isinstance(value,Stats)
+            if value.count==0 : return
+            self.sum+=value.sum
+            self.sum2+=value.sum2
+        elif isinstance(value,(int,float,str)):
+            value=float(value)
+            self.sum+=value
+            self.sum2+=value*value
         return self
 
 class StatsContext(Accumulator.Context):
