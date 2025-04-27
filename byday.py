@@ -142,6 +142,8 @@ class Stats(Additive):
         return (self.sum2/self.count-self.average()**2)**0.5
         pass
 
+# Accumulators
+
 class BitmaskAccum(Accumulator):
     """
     accumulate small set of strings in a form of bitmask
@@ -187,6 +189,7 @@ class BitmaskAccum(Accumulator):
         if self.mask>0: return "?▀▄█"[self.mask]
         return super().format()
 
+
 class StatsAccum(Accumulator):
     class StatsContext(Accumulator.Context):
         def __init__(self):
@@ -195,6 +198,7 @@ class StatsAccum(Accumulator):
         def process(self,entry):
             super().process(entry)
             self.stats.update(entry)
+
     contextType=StatsContext
     def __init__(self,context):
         super().__init__(context)
@@ -209,8 +213,9 @@ class StatsAccum(Accumulator):
         if self.stat.count==0: return super().format()
         return ("%02d"%int(self.stat.max))[0]
 
-# "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,"^`'. "
-# " .:-=+*#%@"
+# "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+# SHORT_GRAYSCALE=" .:-=+*#%@"
+# LONG_GRAYSCALE=' .\'`^",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$'
 
 class DataRow:
     """
@@ -266,7 +271,7 @@ class DataRow:
 
 class Renderer:
 
-    # renderer does to kinds of timezone processing:
+    # renderer does 2 kinds of timezone processing:
     # 1) it can assign timezone to the timestamps that do not have it explicitly
     ITZ=None # if input time stamp's timezone is not explicit, use this one
     # 2) convert timezone for output
@@ -523,26 +528,54 @@ def SummarizeLogFile(logname:str, parser, r:Renderer):
             parser(l,r)
         r.end()
 
-def matchIso(s:str):
-    m=re.search('\d{4}([-/]?\d{2}){2}[T ]\d{2}(:\d{2}(:\d{2}(\.\d*)?)?)?([-+]\d{2}:\d{2})?',s)
-    return m
-
 # finds anything that looks like iso timestamp in the string and if found
 # passes entire string as an entry
+RE_ISOTS=re.compile(r"""
+  (?P<date>  \d{4} (?: [-/] \d{2} ){2} ) # date
+  (?: \S | \s+ ) # separator
+    (?: (?P<hours> \d{1,2} )  # hours (fromisoformat allows just hours)
+    (?: : (?P<minutes>  \d{1,2} )    # minutes
+    (?: : (?P<seconds>  \d{1,2} )    # seconds
+    (?P<fraction> \.\d* )?)?)?)? # fraction seconds, must have exactly 3 digits when present (weird, because format displays 6 places)
+  # if there are fractions, space between time and tz is prohibited,
+  # otherwise (no fractions or seconds), permitted
+  (?: \s*
+    (?P<tzh> [-+] \d{2})
+    :?  # must have ':' for fromisoformat to work
+    (?P<tzm> (?: \d{2} )? ) )? # TZ
+""", re.VERBOSE)
+
+def matchIso(s:str)->datetime :
+    m=re.search(RE_ISOTS,s);
+    if m==None: return None
+    d,hr,mn,sc,f,zh,zm=m.groups('')
+    d=d.replace('/','-')
+    if len(hr)<2:  hr='0'*(2-len(hr))+hr
+    if len(mn)<2:  mn='0'*(2-len(mn))+mn
+    if len(sc)<2:  sc='0'*(2-len(sc))+sc
+    us=0
+    if len(f)>0:
+        us=int(float(f+'0')*1e6)
+        f=(f+'0'*(4-len(f)))[0:4]
+    if zh!='':
+        if zm=='': zm='00'
+        zm=":"+zm
+    normalizedTs=f"{d} {hr}:{mn}:{sc}{f}{zh}{zm}"
+    iso=datetime.fromisoformat(normalizedTs)
+    if iso!=None and us>0:
+        iso=iso.replace(microsecond=us)
+    return iso
+
+
 def parseIso(s : str, r : Renderer):
-    m=matchIso(s)
-    if m!=None:
-        try:
-            ts=datetime.fromisoformat(m.group(0))
-            r.process(ts,s)
-        except ValueError:
-            pass
+    ts=matchIso(s)
+    if ts!=None: r.process(ts,s)
 
 # 127.0.0.1 - - [15/Jan/2025 15:01:59] "GET / HTTP/1.1" 200 -
 #MONTHS=['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 MONTHS=[ datetime(year=1,month=i+1,day=1).strftime("%b").lower() for i in range(12)]
 def parsePythonWeb(s:str, r:Renderer):
-    m=re.search('^(\S+)\s+(\S+)\s+(\S+)\s+\[(\d+)/(.*)/(\d+) (\d+):(\d+):(\d+)\] *(.*)',s)
+    m=re.search('^(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+\\[(\\d+)/(.*)/(\\d+) (\\d+):(\\d+):(\\d+)\\] *(.*)',s)
     if m!=None:
         try:
             (ip,_,_,d,mname,y,h,m,s,rq)=m.groups()
@@ -557,7 +590,7 @@ class WebAccum(StatsAccum):
     def update(self,data):
         (ip,rq)=data
         if ip in self.IGNOREIP : return
-        m=re.search('"(\S+)\s+(\S+)\s*(\S*)"\s*(\d+)',rq)
+        m=re.search('"(\\S+)\\s+(\\S+)\\s*(\\S*)"\\s*(\\d+)',rq)
         if m!=None:
             (verb,urn,ver,code)=m.groups()
             super().update(int(code))
