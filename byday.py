@@ -27,7 +27,6 @@ class Accumulator:
 
     class Context:
         # called for each entry of the subinterval
-        duration_s=0
         def process(self, entry):
             pass
         # called once in the end of the row to print row "legend"
@@ -63,13 +62,17 @@ class Accumulator:
         else: return ' '
 
 class Counted:
+    """
+    Most generic aggregator.
+    Calculates total number of updates together with first and last updates.
+    """
     def __init__(self):
         self.count=0
         self.first=None
         self.last=None
 
     def update(self, value):
-        if isinstance(value,Counted)
+        if isinstance(value,Counted):
             if self.first==None: self.first=value.first
             self.last=value.last
             self.count+=value.count
@@ -80,6 +83,10 @@ class Counted:
         return self
 
 class Ordered(Counted):
+    """
+    Aggregator for values that can be compared with < and >.
+    In addition to data collected by Counted, collects min and max value.
+    """
     def __init__(self):
         super().__init__()
         self.min=None
@@ -96,33 +103,44 @@ class Ordered(Counted):
         return self
 
 
-class Stats(Ordered):
+
+class Additive(Ordered):
+    """
+    For values that can be added together with a +.
+    Additionally accumulates total sum of entries.
+    """
     def __init__(self):
         super().__init__()
-        self.sum=0.0
-        self.sum2=0.0
+        self.sum=None
+
+    def update(self, value):
+        super().update(value)
+        if self.sum==None: self.sum=value
+        else: self.sum+=value
+        return self
+
 
     def __repr__(self):
         return f"{__name__}({self.min}..{self.max}/{self.count})"
 
+class Stats(Additive):
+    def __init__(self):
+        super().__init__()
+        self.sum2=0.0
+
     def update(self, value):
-        super().update(value)
-        if isinstance(value,Stats)
-            if value.count==0 : return
-            self.sum+=value.sum
-            self.sum2+=value.sum2
-        elif isinstance(value,(int,float,str)):
-            value=float(value)
-            self.sum+=value
-            self.sum2+=value*value
+        v=float(value)
+        super().update(v)
+        self.sum2+=v*v
         return self
 
-class StatsContext(Accumulator.Context):
-    def __init__(self):
-        self.stats=Stats()
-    def process(self,entry):
-        super().process(entry)
-        self.stats.update(entry)
+    def average(self):
+        return self.sum/self.count
+
+    # √(1/n · Σ(xi-Σxi/n)²) = √[(Σxi²)/n-μ²]
+    def stdev(self):
+        return (self.sum2/self.count-self.average()**2)**0.5
+        pass
 
 class BitmaskAccum(Accumulator):
     """
@@ -170,6 +188,13 @@ class BitmaskAccum(Accumulator):
         return super().format()
 
 class StatsAccum(Accumulator):
+    class StatsContext(Accumulator.Context):
+        def __init__(self):
+            self.stats=Stats()
+            self.cell_duration_s=None
+        def process(self,entry):
+            super().process(entry)
+            self.stats.update(entry)
     contextType=StatsContext
     def __init__(self,context):
         super().__init__(context)
@@ -212,6 +237,8 @@ class DataRow:
         self.render.setRangeFor(ts,self)
         # initialize common context
         self.context=self.accumType.contextType()
+        self.context.parentRow=self
+        self.context.bucket_duration_s=self.duration_s/self.length
         # all buckets share row context
         self.buckets=[self.accumType(self.context) for i in range(self.length)]
 
@@ -299,6 +326,7 @@ class IntervalPrinter(Renderer):
         # super().__init__(duration,length,accumType)
         self.rowDuration=duration
         self.dataRow=DataRow(length,render=self,accumType=accumType)
+        self.dataRow.setDuration(self.rowDuration)
         self.scale=None
         self.lastStart=None
         self.ROWHEADERWIDTH=len(self._formatRowHeader(datetime.now()))
@@ -357,6 +385,7 @@ class IntervalPrinter(Renderer):
         print(self.ATTR_ROWHEADER+rh+self.ATTR_NORMAL+body+self.ATTR_SCALE+legend+self.ATTR_NORMAL)
 
 class MinutePrinter(IntervalPrinter):
+    SCALEFILLER='"'
     def __init__(self,length, accumType):
         super().__init__(timedelta(seconds=60),length, accumType)
         self.makeScale([60, 12, 6, 4, 2, 1])
@@ -378,7 +407,7 @@ class MinutePrinter(IntervalPrinter):
         return h
 
     def _formatRowHeader(self, ts):
-        return ts.strftime(" :%M|")
+        return ts.strftime(" :%M'")
 
     def _isBlockHeaderNeeded(self):
         return (self.lastStart.year!=self.dataRow.start.year
@@ -387,6 +416,7 @@ class MinutePrinter(IntervalPrinter):
             or self.lastStart.hour!=self.dataRow.start.hour)
 
 class HourPrinter(IntervalPrinter):
+    SCALEFILLER="'"
     def __init__(self,length, accumType):
         super().__init__(timedelta(seconds=3600),length, accumType)
         self.makeScale([60, 12, 6, 4, 2, 1])
@@ -418,7 +448,7 @@ class DayPrinter(IntervalPrinter):
         return start.strftime("%Y-%b")
 
     def _formatRowHeader(self, ts):
-        return ts.strftime("%d:")
+        return ts.strftime("%d|")
 
     def _isBlockHeaderNeeded(self):
         return (self.lastStart.year!=self.dataRow.start.year
@@ -468,17 +498,25 @@ class MonthPrinter(IntervalPrinter):
         return start.strftime("%Y")
 
     def _formatRowHeader(self, ts):
-        return ts.strftime("%b :")
+        return ts.strftime(" %b|")
 
     def _isBlockHeaderNeeded(self):
         return (self.lastStart.year!=self.dataRow.start.year)
 
 # TODO? WeekPrinter? Monthprinter? YearPrinter? MinutePrinter
 
+def openLogFile(logname):
+    if logname[-3:]=='.gz':
+        import gzip
+        return gzip.open(logname,"rb")
+    else:
+        return open(logname,"rb")
+
 def SummarizeLogFile(logname:str, parser, r:Renderer):
-    with open(logname,"r") as file:
+    with openLogFile(logname) as file:
         while True:
             line=file.readline()
+            line=line.decode('utf-8')
             if not line: break
             # log-specific parsing
             l=line.rstrip("\r\n")
@@ -515,9 +553,10 @@ def parsePythonWeb(s:str, r:Renderer):
             pass
 
 class WebAccum(StatsAccum):
+    IGNOREIP=['127.0.0.1']
     def update(self,data):
         (ip,rq)=data
-        if ip=='127.0.0.1': return
+        if ip in self.IGNOREIP : return
         m=re.search('"(\S+)\s+(\S+)\s*(\S*)"\s*(\d+)',rq)
         if m!=None:
             (verb,urn,ver,code)=m.groups()
@@ -533,10 +572,16 @@ class WebAccum(StatsAccum):
 # must receive entry as a pair of (prio:int, symbol:string)
 # symbol represents event, prio its importance. Events with higher importance
 # override events with lower importance
+# using an Ordered aggregator with an element of pair (prio,symbol) and using
+# min or max's second element as a format would work too, except that prio
+# would have to be different for all entries and the count applies to all the
+# entries, not just those with the highest priority
 class PriorityEventsAccum(Accumulator):
     prio=-999999
     symb='?'
     count=0
+    def __repr__(self):
+        return f"{__name__}(p={self.prio},s={self.symb},#={self.count})"
     def update(self,entry):
         super().update(entry)
         try:
@@ -546,9 +591,14 @@ class PriorityEventsAccum(Accumulator):
                 self.prio=prio
                 self.count=0
             elif prio==self.prio:
+                self.symb=symb # of equal priorities use last symbol
                 self.count+=1
+            # print("%s %d %s"%(entry,self.prio,self.symb))
         except ValueError:
             pass
+    def format(self):
+        if self.initialized: return self.symb
+        else: return ' '
 
 if __name__=='__main__':
     import sys
