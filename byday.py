@@ -19,76 +19,6 @@ Each accumulator, in addition to holding a value, must also have "uninitialized"
 
 """
 
-# Aggregators
-
-class Counted:
-    """
-    Most generic aggregator.
-    Calculates total number of updates together with first and last updates.
-    """
-    def __init__(self):
-        self.count=0
-        self.first=None
-        self.last=None
-
-    def update(self, value):
-        if self.first==None: self.first=value
-        self.last=value
-        self.count+=1
-        return self
-
-class Ordered(Counted):
-    """
-    Aggregator for values that can be compared with < and >.
-    In addition to data collected by Counted, collects min and max value.
-    """
-    def __init__(self):
-        super().__init__()
-        self.min=None
-        self.max=None
-
-    def update(self, value):
-        super().update(value)
-        if self.max==None or value>self.max: self.max=value
-        if self.min==None or value<self.min: self.min=value
-        return self
-
-class Additive(Ordered):
-    """
-    For values that can be added together with a +.
-    Additionally accumulates total sum of entries.
-    """
-    def __init__(self):
-        super().__init__()
-        self.sum=None
-
-    def update(self, value):
-        super().update(value)
-        if self.sum==None: self.sum=value
-        else: self.sum+=value
-        return self
-
-class Stats(Additive):
-    def __init__(self):
-        super().__init__()
-        self.sum2=0.0
-
-    def update(self, value):
-        v=float(value)
-        super().update(v)
-        self.sum2+=v*v
-        return self
-
-    def average(self):
-        return self.sum/self.count
-
-    # √(1/n · Σ(xi-Σxi/n)²) = √[(Σxi²)/n-μ²]
-    def stdev(self):
-        return (self.sum2/self.count-self.average()**2)**0.5
-        pass
-
-# Accumulators
-
 class Accumulator:
     """
     Base class, but can be used in itself for simple seen/unseen functionality
@@ -117,19 +47,102 @@ class Accumulator:
         self.context=context
         self.initialized=False
 
+    def __add__(self,entry):
+        return self.update(entry)
+        
     def update(self,entry):
         self.initialized=True
         return self
 
-    def __add__(self,other):
-        return self.update(other)
+    def __str__(self):
+        return self.format()
 
     def format(self):
         if self.initialized: return '-'
         else: return ' '
 
-    def __str__(self):
-        return self.format()
+class Counted:
+    """
+    Most generic aggregator.
+    Calculates total number of updates together with first and last updates.
+    """
+    def __init__(self):
+        self.count=0
+        self.first=None
+        self.last=None
+
+    def update(self, value):
+        if isinstance(value,Counted):
+            if self.first==None: self.first=value.first
+            self.last=value.last
+            self.count+=value.count
+        else:
+            if self.first==None: self.first=value
+            self.last=value
+            self.count+=1
+        return self
+
+class Ordered(Counted):
+    """
+    Aggregator for values that can be compared with < and >.
+    In addition to data collected by Counted, collects min and max value.
+    """
+    def __init__(self):
+        super().__init__()
+        self.min=None
+        self.max=None
+
+    def update(self,value):
+        super().update(value)
+        if isinstance(value,Ordered):
+            if self.min==None or ( value.min!=None and value.min<self.min): self.min=value.min
+            if self.max==None or (value.max !=None and value.max>self.max): self.max=value.max
+        else:
+            if self.min==None or value<self.min: self.min=value
+            if self.max==None or value>self.max: self.max=value
+        return self
+
+
+
+class Additive(Ordered):
+    """
+    For values that can be added together with a +.
+    Additionally accumulates total sum of entries.
+    """
+    def __init__(self):
+        super().__init__()
+        self.sum=None
+
+    def update(self, value):
+        super().update(value)
+        if self.sum==None: self.sum=value
+        else: self.sum+=value
+        return self
+
+
+    def __repr__(self):
+        return f"{__name__}({self.min}..{self.max}/{self.count})"
+
+class Stats(Additive):
+    def __init__(self):
+        super().__init__()
+        self.sum2=0.0
+
+    def update(self, value):
+        v=float(value)
+        super().update(v)
+        self.sum2+=v*v
+        return self
+
+    def average(self):
+        return self.sum/self.count
+
+    # √(1/n · Σ(xi-Σxi/n)²) = √[(Σxi²)/n-μ²]
+    def stdev(self):
+        return (self.sum2/self.count-self.average()**2)**0.5
+        pass
+
+# Accumulators
 
 class BitmaskAccum(Accumulator):
     """
@@ -592,6 +605,10 @@ class WebAccum(StatsAccum):
 # must receive entry as a pair of (prio:int, symbol:string)
 # symbol represents event, prio its importance. Events with higher importance
 # override events with lower importance
+# using an Ordered aggregator with an element of pair (prio,symbol) and using
+# min or max's second element as a format would work too, except that prio
+# would have to be different for all entries and the count applies to all the
+# entries, not just those with the highest priority
 class PriorityEventsAccum(Accumulator):
     prio=-999999
     symb='?'
@@ -607,6 +624,7 @@ class PriorityEventsAccum(Accumulator):
                 self.prio=prio
                 self.count=0
             elif prio==self.prio:
+                self.symb=symb # of equal priorities use last symbol
                 self.count+=1
             # print("%s %d %s"%(entry,self.prio,self.symb))
         except ValueError:
