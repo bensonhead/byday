@@ -519,7 +519,7 @@ def SummarizeLogFile(logname:str, parser, r:Renderer):
 # passes entire string as an entry
 RE_ISOTS=re.compile(r"""
   (?P<date>  \d{4} (?: [-/] \d{2} ){2} ) # date
-  (?: \S | \s+ ) # separator
+  (?: \S | \s+ ) # separator (seen spaces, Z, T)
     (?: (?P<hours> \d{1,2} )  # hours (fromisoformat allows just hours)
     (?: : (?P<minutes>  \d{1,2} )    # minutes
     (?: : (?P<seconds>  \d{1,2} )    # seconds
